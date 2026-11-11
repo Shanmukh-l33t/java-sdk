@@ -3,8 +3,10 @@
  */
 package io.modelcontextprotocol.json.schema.jackson2;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 import com.networknt.schema.SchemaLocation;
@@ -160,17 +162,44 @@ public class DefaultJsonSchemaValidator implements JsonSchemaValidator {
 
 	/**
 	 * Generates a cache key for the given schema map.
+	 * <p>
+	 * The key is derived from the schema's canonical serialization (object entries sorted
+	 * by key), so that two schemas share a cache entry if and only if their content is
+	 * equal. The schema's hash code is not usable as a key: distinct schemas can have
+	 * equal hash codes, which would make them share one compiled schema and validate
+	 * input against the wrong schema.
 	 * @param schema the schema map
 	 * @return a cache key string
 	 */
 	protected String generateCacheKey(Map<String, Object> schema) {
-		if (schema.containsKey("$id")) {
-			// Use the (optional) "$id" field as the cache key if present
-			return "" + schema.get("$id");
+		Object canonicalSchema = canonicalize(schema);
+		JsonNode schemaNode = this.objectMapper.valueToTree(canonicalSchema);
+		// Handle case where ObjectMapper might return null (e.g., in mocked scenarios)
+		return (schemaNode != null) ? schemaNode.toString() : String.valueOf(canonicalSchema);
+	}
+
+	/**
+	 * Recursively copies the given value with all map entries sorted by key so that equal
+	 * schemas always produce the same serialization.
+	 * @param value the value to canonicalize (map, list or scalar)
+	 * @return the canonicalized value
+	 */
+	private static Object canonicalize(Object value) {
+		if (value instanceof Map<?, ?> map) {
+			Map<String, Object> sorted = new TreeMap<>();
+			for (Map.Entry<?, ?> entry : map.entrySet()) {
+				sorted.put(String.valueOf(entry.getKey()), canonicalize(entry.getValue()));
+			}
+			return sorted;
 		}
-		// Fall back to schema's hash code as a simple cache key
-		// For more sophisticated caching, could use content-based hashing
-		return String.valueOf(schema.hashCode());
+		if (value instanceof List<?> list) {
+			List<Object> canonicalList = new ArrayList<>(list.size());
+			for (Object element : list) {
+				canonicalList.add(canonicalize(element));
+			}
+			return canonicalList;
+		}
+		return value;
 	}
 
 	/**
