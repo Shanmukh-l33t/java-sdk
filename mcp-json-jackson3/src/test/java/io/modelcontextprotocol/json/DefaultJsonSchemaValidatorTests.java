@@ -9,6 +9,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -613,6 +614,60 @@ class DefaultJsonSchemaValidatorTests {
 		assertNotNull(response.errorMessage());
 		assertTrue(response.errorMessage().contains("Error parsing tool JSON Schema"));
 		assertTrue(response.errorMessage().contains("Failed to convert schema to JsonNode"));
+	}
+
+	@Test
+	void testDistinctSchemasWithCollidingHashCodesDoNotShareCacheEntry() {
+		String schemaAJson = """
+				{
+					"type": "object",
+					"properties": {
+						"a": {"type": "string"}
+					},
+					"required": ["a"],
+					"additionalProperties": false
+				}
+				""";
+		String schemaBJson = schemaAJson.replace("\"a\"", "\"b\"");
+		Map<String, Object> schemaA = toMap(schemaAJson);
+		Map<String, Object> schemaB = toMap(schemaBJson);
+
+		// Sanity: the two schemas are distinct but their map hash codes collide.
+		// That collision is what previously made them share one cache entry.
+		assertNotEquals(schemaA, schemaB);
+		assertEquals(schemaA.hashCode(), schemaB.hashCode());
+
+		// Warm up the shared validator's cache with schema A
+		assertTrue(validator.validate(schemaA, Map.of("a", "x")).valid());
+
+		// Schema B must be validated as itself, not against schema A's cached schema
+		ValidationResponse response = validator.validate(schemaB, Map.of("b", "x"));
+		assertTrue(response.valid(),
+				"Expected {b=x} to be valid against schema B, but got: " + response.errorMessage());
+		assertFalse(validator.validate(schemaB, Map.of("a", "x")).valid());
+	}
+
+	@Test
+	void testEqualSchemasShareCacheEntry() {
+		String schemaJson = """
+				{
+					"type": "object",
+					"properties": {
+						"a": {"type": "string"}
+					},
+					"required": ["a"],
+					"additionalProperties": false
+				}
+				""";
+		Map<String, Object> schemaA = toMap(schemaJson);
+		Map<String, Object> schemaB = toMap(schemaJson);
+		assertNotSame(schemaA, schemaB);
+
+		assertTrue(validator.validate(schemaA, Map.of("a", "x")).valid());
+		assertTrue(validator.validate(schemaB, Map.of("a", "x")).valid());
+
+		// Equal schemas must still share a single compiled entry
+		assertEquals(1, validator.getCacheSize());
 	}
 
 	@ParameterizedTest
