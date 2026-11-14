@@ -467,6 +467,7 @@ public class McpAsyncServer {
 						.content(List.of(McpSchema.TextContent.builder(validation.jsonStructuredOutput()).build()))
 						.isError(result.isError())
 						.structuredContent(result.structuredContent())
+						.meta(result.meta())
 						.build();
 				}
 
