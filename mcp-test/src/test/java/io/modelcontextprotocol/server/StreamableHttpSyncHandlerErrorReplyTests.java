@@ -8,6 +8,8 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -73,6 +75,9 @@ class StreamableHttpSyncHandlerErrorReplyTests {
 		// The interrupt the scheduler delivers to a subscription whose callable threw is
 		// the mechanism which aborts the write: it must not reach the worker at all
 		assertThat(outcome.interruptedWrites()).as("writes interrupted by the scheduler: %s", outcome).isZero();
+		// The handler still runs off the caller's thread: the fix must not trade the
+		// loss for executing blocking handlers on the container thread
+		assertThat(outcome.handlerThreads()).isNotEmpty().allMatch(thread -> thread.startsWith("boundedElastic"));
 	}
 
 	@Test
@@ -86,12 +91,14 @@ class StreamableHttpSyncHandlerErrorReplyTests {
 	private Outcome run(int threads, int requestsPerThread, Duration flushWindow, boolean handlerThrows)
 			throws Exception {
 		CapturingProvider provider = new CapturingProvider();
+		Set<String> handlerThreads = ConcurrentHashMap.newKeySet();
 		McpServer.sync(provider)
 			.serverInfo("test-server", "1.0.0")
 			.capabilities(McpSchema.ServerCapabilities.builder().prompts(false).build())
 			.prompts(new McpServerFeatures.SyncPromptSpecification(
 					new McpSchema.Prompt(PROMPT_NAME, "A prompt whose handler may throw", List.of()),
 					(exchange, request) -> {
+						handlerThreads.add(Thread.currentThread().getName());
 						if (handlerThrows) {
 							throw new IllegalStateException("handler failure");
 						}
@@ -146,7 +153,7 @@ class StreamableHttpSyncHandlerErrorReplyTests {
 
 		long replies = sent.stream().filter(McpSchema.JSONRPCResponse.class::isInstance).count();
 		return new Outcome(threads * requestsPerThread, (int) replies, attempts.get(), interruptedAtEntry.get(),
-				interruptedDuringFlush.get(), failedSubscriptions.get());
+				interruptedDuringFlush.get(), failedSubscriptions.get(), handlerThreads);
 	}
 
 	/**
@@ -160,9 +167,10 @@ class StreamableHttpSyncHandlerErrorReplyTests {
 	 * was already set
 	 * @param interruptedDuringFlush the writes whose flush was interrupted
 	 * @param failedSubscriptions the requests whose subscription ended in an error
+	 * @param handlerThreads the threads the handler ran on
 	 */
 	record Outcome(int requests, int replies, int writeAttempts, int interruptedAtEntry, int interruptedDuringFlush,
-			int failedSubscriptions) {
+			int failedSubscriptions, Set<String> handlerThreads) {
 
 		int lost() {
 			return this.requests - this.replies;
