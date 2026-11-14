@@ -8,6 +8,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Callable;
 import java.util.function.BiConsumer;
 import java.util.function.BiFunction;
 
@@ -15,6 +16,7 @@ import io.modelcontextprotocol.spec.McpSchema;
 import io.modelcontextprotocol.spec.McpSchema.CallToolRequest;
 import io.modelcontextprotocol.util.Assert;
 import io.modelcontextprotocol.util.Utils;
+import reactor.core.Exceptions;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -25,6 +27,36 @@ import reactor.core.scheduler.Schedulers;
  * @author Jihoon Kim
  */
 public class McpServerFeatures {
+
+	/**
+	 * Runs a synchronous handler, offloaded to {@link Schedulers#boundedElastic()} unless
+	 * asked to run inline.
+	 * <p>
+	 * The handler's failure is turned into an error signal from inside the deferred
+	 * subscription rather than thrown out of a {@code Mono.fromCallable}: a callable
+	 * which throws makes Reactor cancel the subscription it runs on before delivering the
+	 * error, and the scheduler then disposes that cancelled subscription by interrupting
+	 * the worker (reactor-core issue 4483). Downstream of the offloading boundary the
+	 * server writes the reply of the request, so that interrupt would abort the write of
+	 * the error reply on a transport whose flush respects the interrupt status, and the
+	 * client would never see the reply.
+	 * @param handler the blocking handler to run
+	 * @param immediateExecution when true, run it on the calling thread
+	 * @param <T> the type of the handler result
+	 * @return the result of the handler, or its failure as an error signal
+	 */
+	private static <T> Mono<T> fromSyncHandler(Callable<T> handler, boolean immediateExecution) {
+		Mono<T> result = Mono.defer(() -> {
+			try {
+				return Mono.justOrEmpty(handler.call());
+			}
+			catch (Throwable ex) {
+				Exceptions.throwIfFatal(ex);
+				return Mono.error(ex);
+			}
+		});
+		return immediateExecution ? result : result.subscribeOn(Schedulers.boundedElastic());
+	}
 
 	/**
 	 * Asynchronous server features specification.
@@ -251,11 +283,9 @@ public class McpServerFeatures {
 			}
 
 			BiFunction<McpAsyncServerExchange, McpSchema.CallToolRequest, Mono<McpSchema.CallToolResult>> callHandler = (
-					exchange, req) -> {
-				var toolResult = Mono
-					.fromCallable(() -> syncToolSpec.callHandler().apply(new McpSyncServerExchange(exchange), req));
-				return immediate ? toolResult : toolResult.subscribeOn(Schedulers.boundedElastic());
-			};
+					exchange, req) -> fromSyncHandler(
+							() -> syncToolSpec.callHandler().apply(new McpSyncServerExchange(exchange), req),
+							immediate);
 
 			return new AsyncToolSpecification(syncToolSpec.tool(), callHandler);
 		}
@@ -355,11 +385,10 @@ public class McpServerFeatures {
 			if (resource == null) {
 				return null;
 			}
-			return new AsyncResourceSpecification(resource.resource(), (exchange, req) -> {
-				var resourceResult = Mono
-					.fromCallable(() -> resource.readHandler().apply(new McpSyncServerExchange(exchange), req));
-				return immediateExecution ? resourceResult : resourceResult.subscribeOn(Schedulers.boundedElastic());
-			});
+			return new AsyncResourceSpecification(resource.resource(),
+					(exchange, req) -> fromSyncHandler(
+							() -> resource.readHandler().apply(new McpSyncServerExchange(exchange), req),
+							immediateExecution));
 		}
 	}
 
@@ -396,11 +425,10 @@ public class McpServerFeatures {
 			if (resource == null) {
 				return null;
 			}
-			return new AsyncResourceTemplateSpecification(resource.resourceTemplate(), (exchange, req) -> {
-				var resourceResult = Mono
-					.fromCallable(() -> resource.readHandler().apply(new McpSyncServerExchange(exchange), req));
-				return immediateExecution ? resourceResult : resourceResult.subscribeOn(Schedulers.boundedElastic());
-			});
+			return new AsyncResourceTemplateSpecification(resource.resourceTemplate(),
+					(exchange, req) -> fromSyncHandler(
+							() -> resource.readHandler().apply(new McpSyncServerExchange(exchange), req),
+							immediateExecution));
 		}
 	}
 
@@ -443,11 +471,10 @@ public class McpServerFeatures {
 			if (prompt == null) {
 				return null;
 			}
-			return new AsyncPromptSpecification(prompt.prompt(), (exchange, req) -> {
-				var promptResult = Mono
-					.fromCallable(() -> prompt.promptHandler().apply(new McpSyncServerExchange(exchange), req));
-				return immediateExecution ? promptResult : promptResult.subscribeOn(Schedulers.boundedElastic());
-			});
+			return new AsyncPromptSpecification(prompt.prompt(),
+					(exchange, req) -> fromSyncHandler(
+							() -> prompt.promptHandler().apply(new McpSyncServerExchange(exchange), req),
+							immediateExecution));
 		}
 	}
 
@@ -483,12 +510,10 @@ public class McpServerFeatures {
 			if (completion == null) {
 				return null;
 			}
-			return new AsyncCompletionSpecification(completion.referenceKey(), (exchange, request) -> {
-				var completionResult = Mono.fromCallable(
-						() -> completion.completionHandler().apply(new McpSyncServerExchange(exchange), request));
-				return immediateExecution ? completionResult
-						: completionResult.subscribeOn(Schedulers.boundedElastic());
-			});
+			return new AsyncCompletionSpecification(completion.referenceKey(),
+					(exchange, request) -> fromSyncHandler(
+							() -> completion.completionHandler().apply(new McpSyncServerExchange(exchange), request),
+							immediateExecution));
 		}
 	}
 
